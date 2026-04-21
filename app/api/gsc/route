@@ -1,0 +1,125 @@
+import { getServerSession } from 'next-auth'
+import { authOptions } from '../auth/[...nextauth]/route'
+import { google } from 'googleapis'
+
+export async function GET(request) {
+  const session = await getServerSession(authOptions)
+  if (!session?.accessToken) {
+    return Response.json({ error: 'Non authentifié' }, { status: 401 })
+  }
+
+  const { searchParams } = new URL(request.url)
+  const siteUrl = searchParams.get('site')
+  const days = parseInt(searchParams.get('days') || '30')
+
+  if (!siteUrl) {
+    return Response.json({ error: 'Paramètre site manquant' }, { status: 400 })
+  }
+
+  const auth = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  )
+  auth.setCredentials({ access_token: session.accessToken })
+
+  const searchconsole = google.searchconsole({ version: 'v1', auth })
+
+  const endDate = new Date()
+  const startDate = new Date()
+  startDate.setDate(startDate.getDate() - days)
+
+  const fmt = (d) => d.toISOString().split('T')[0]
+
+  try {
+    // 1. Liste des sites disponibles
+    if (siteUrl === '__list__') {
+      const sitesRes = await searchconsole.sites.list()
+      const sites = (sitesRes.data.siteEntry || []).map(s => ({
+        url: s.siteUrl,
+        permissionLevel: s.permissionLevel,
+      }))
+      return Response.json({ sites })
+    }
+
+    // 2. Données de performance par requête
+    const [queriesRes, pagesRes] = await Promise.all([
+      searchconsole.searchanalytics.query({
+        siteUrl,
+        requestBody: {
+          startDate: fmt(startDate),
+          endDate: fmt(endDate),
+          dimensions: ['query'],
+          rowLimit: 500,
+          dataState: 'final',
+        },
+      }),
+      searchconsole.searchanalytics.query({
+        siteUrl,
+        requestBody: {
+          startDate: fmt(startDate),
+          endDate: fmt(endDate),
+          dimensions: ['page'],
+          rowLimit: 100,
+        },
+      }),
+    ])
+
+    const queries = (queriesRes.data.rows || []).map(r => ({
+      query: r.keys[0],
+      clicks: r.clicks,
+      impressions: r.impressions,
+      ctr: parseFloat((r.ctr * 100).toFixed(2)),
+      position: parseFloat(r.position.toFixed(1)),
+    }))
+
+    const pages = (pagesRes.data.rows || []).map(r => ({
+      page: r.keys[0],
+      clicks: r.clicks,
+      impressions: r.impressions,
+      ctr: parseFloat((r.ctr * 100).toFixed(2)),
+      position: parseFloat(r.position.toFixed(1)),
+    }))
+
+    // 3. Évolution sur 6 mois (données mensuelles)
+    const months = []
+    for (let i = 5; i >= 0; i--) {
+      const start = new Date()
+      start.setMonth(start.getMonth() - i)
+      start.setDate(1)
+      const end = new Date(start)
+      end.setMonth(end.getMonth() + 1)
+      end.setDate(0)
+      months.push({ start: fmt(start), end: fmt(end), label: start.toLocaleString('fr', { month: 'short' }) })
+    }
+
+    const evolutionData = await Promise.all(
+      months.map(m =>
+        searchconsole.searchanalytics.query({
+          siteUrl,
+          requestBody: {
+            startDate: m.start,
+            endDate: m.end,
+            dimensions: ['query'],
+            rowLimit: 500,
+          },
+        }).then(res => {
+          const rows = res.data.rows || []
+          return {
+            label: m.label,
+            top3: rows.filter(r => r.position <= 3).length,
+            top10: rows.filter(r => r.position <= 10).length,
+            top20: rows.filter(r => r.position <= 20).length,
+          }
+        })
+      )
+    )
+
+    return Response.json({ queries, pages, evolution: evolutionData })
+  } catch (err) {
+    console.error('GSC error:', err)
+    return Response.json(
+      { error: err.message || 'Erreur API Search Console' },
+      { status: 500 }
+    )
+  }
+}
