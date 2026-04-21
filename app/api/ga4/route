@@ -1,0 +1,88 @@
+import { getServerSession } from 'next-auth'
+import { authOptions } from '../auth/[...nextauth]/route'
+import { google } from 'googleapis'
+
+export async function GET(request) {
+  const session = await getServerSession(authOptions)
+  if (!session?.accessToken) {
+    return Response.json({ error: 'Non authentifié' }, { status: 401 })
+  }
+
+  const { searchParams } = new URL(request.url)
+  const propertyId = searchParams.get('property')
+  const days = parseInt(searchParams.get('days') || '30')
+
+  const auth = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  )
+  auth.setCredentials({ access_token: session.accessToken })
+
+  const analyticsAdmin = google.analyticsadmin({ version: 'v1beta', auth })
+  const analyticsData = google.analyticsdata({ version: 'v1beta', auth })
+
+  try {
+    // Lister les propriétés GA4 disponibles
+    if (!propertyId || propertyId === '__list__') {
+      const res = await analyticsAdmin.properties.list({ filter: 'parent:accounts/-' })
+      const properties = (res.data.properties || []).map(p => ({
+        id: p.name.replace('properties/', ''),
+        displayName: p.displayName,
+        name: p.name,
+      }))
+      return Response.json({ properties })
+    }
+
+    const endDate = 'today'
+    const startDate = `${days}daysAgo`
+
+    // Sessions par canal d'acquisition
+    const [channelsRes, timeSeriesRes] = await Promise.all([
+      analyticsData.properties.runReport({
+        property: `properties/${propertyId}`,
+        requestBody: {
+          dimensions: [{ name: 'sessionDefaultChannelGroup' }],
+          metrics: [
+            { name: 'sessions' },
+            { name: 'activeUsers' },
+            { name: 'engagementRate' },
+            { name: 'bounceRate' },
+          ],
+          dateRanges: [{ startDate, endDate }],
+          orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+        },
+      }),
+      analyticsData.properties.runReport({
+        property: `properties/${propertyId}`,
+        requestBody: {
+          dimensions: [{ name: 'date' }],
+          metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+          dateRanges: [{ startDate, endDate }],
+          orderBys: [{ dimension: { dimensionName: 'date' } }],
+        },
+      }),
+    ])
+
+    const channels = (channelsRes.data.rows || []).map(r => ({
+      canal: r.dimensionValues[0].value,
+      sessions: parseInt(r.metricValues[0].value),
+      users: parseInt(r.metricValues[1].value),
+      engagementRate: parseFloat((parseFloat(r.metricValues[2].value) * 100).toFixed(1)),
+      bounceRate: parseFloat((parseFloat(r.metricValues[3].value) * 100).toFixed(1)),
+    }))
+
+    const timeSeries = (timeSeriesRes.data.rows || []).map(r => ({
+      date: r.dimensionValues[0].value,
+      sessions: parseInt(r.metricValues[0].value),
+      users: parseInt(r.metricValues[1].value),
+    }))
+
+    return Response.json({ channels, timeSeries })
+  } catch (err) {
+    console.error('GA4 error:', err)
+    return Response.json(
+      { error: err.message || 'Erreur API Google Analytics' },
+      { status: 500 }
+    )
+  }
+}
