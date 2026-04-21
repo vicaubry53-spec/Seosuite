@@ -1,0 +1,98 @@
+'use client'
+import { useSession, signOut } from 'next-auth/react'
+import { useRouter } from 'next/navigation'
+import { useState, useEffect, useCallback } from 'react'
+import Sidebar from '@/components/Sidebar'
+import Topbar from '@/components/Topbar'
+import PositionsPage from '@/components/PositionsPage'
+import TraficPage from '@/components/TraficPage'
+import OpportunitesPage from '@/components/OpportunitesPage'
+import OptimiserPage from '@/components/OptimiserPage'
+
+export default function Dashboard() {
+  const { data: session, status } = useSession()
+  const router = useRouter()
+  const [activePage, setActivePage] = useState('positions')
+  const [sites, setSites] = useState([])
+  const [activeSite, setActiveSite] = useState(null)
+  const [properties, setProperties] = useState([])
+  const [activeProperty, setActiveProperty] = useState(null)
+  const [days, setDays] = useState(30)
+  const [gscData, setGscData] = useState(null)
+  const [ga4Data, setGa4Data] = useState(null)
+  const [loading, setLoading] = useState({ gsc: false, ga4: false })
+  const [errors, setErrors] = useState({})
+
+  useEffect(() => { if (status === 'unauthenticated') router.push('/login') }, [status, router])
+  useEffect(() => { if (!session) return; fetchSites(); fetchProperties() }, [session])
+  useEffect(() => { if (activeSite) fetchGSC() }, [activeSite, days])
+  useEffect(() => { if (activeProperty) fetchGA4() }, [activeProperty, days])
+
+  async function fetchSites() {
+    try {
+      const res = await fetch('/api/gsc?site=__list__')
+      const data = await res.json()
+      if (data.sites?.length) { setSites(data.sites); setActiveSite(data.sites[0].url) }
+    } catch (e) { setErrors(p => ({ ...p, sites: 'Impossible de charger les sites GSC' })) }
+  }
+
+  async function fetchProperties() {
+    try {
+      const res = await fetch('/api/ga4?property=__list__')
+      const data = await res.json()
+      if (data.properties?.length) { setProperties(data.properties); setActiveProperty(data.properties[0].id) }
+    } catch (e) { setErrors(p => ({ ...p, properties: 'Impossible de charger GA4' })) }
+  }
+
+  const fetchGSC = useCallback(async () => {
+    if (!activeSite) return
+    setLoading(l => ({ ...l, gsc: true }))
+    try {
+      const res = await fetch(`/api/gsc?site=${encodeURIComponent(activeSite)}&days=${days}`)
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      setGscData(data)
+    } catch (e) { setErrors(p => ({ ...p, gsc: e.message }))
+    } finally { setLoading(l => ({ ...l, gsc: false })) }
+  }, [activeSite, days])
+
+  const fetchGA4 = useCallback(async () => {
+    if (!activeProperty) return
+    setLoading(l => ({ ...l, ga4: true }))
+    try {
+      const res = await fetch(`/api/ga4?property=${activeProperty}&days=${days}`)
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      setGa4Data(data)
+    } catch (e) { setErrors(p => ({ ...p, ga4: e.message }))
+    } finally { setLoading(l => ({ ...l, ga4: false })) }
+  }, [activeProperty, days])
+
+  if (status === 'loading') return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="text-sm text-gray-400">Chargement…</div>
+    </div>
+  )
+
+  const pages = {
+    positions: <PositionsPage data={gscData} loading={loading.gsc} error={errors.gsc} />,
+    trafic: <TraficPage data={ga4Data} loading={loading.ga4} error={errors.ga4} />,
+    opportunites: <OpportunitesPage data={gscData} loading={loading.gsc} error={errors.gsc} />,
+    optimiser: <OptimiserPage data={gscData} loading={loading.gsc} error={errors.gsc} />,
+  }
+
+  return (
+    <div className="flex h-screen overflow-hidden">
+      <Sidebar activePage={activePage} setActivePage={setActivePage} />
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <Topbar
+          sites={sites} activeSite={activeSite} setActiveSite={setActiveSite}
+          properties={properties} activeProperty={activeProperty} setActiveProperty={setActiveProperty}
+          days={days} setDays={setDays} session={session} onSignOut={signOut}
+          onRefresh={() => { fetchGSC(); fetchGA4() }}
+        />
+        <main className="flex-1 overflow-y-auto bg-gray-50 p-5">{pages[activePage]}</main>
+      </div>
+    </div>
+  )
+}
